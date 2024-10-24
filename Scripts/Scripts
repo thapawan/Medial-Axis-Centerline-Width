@@ -1,1 +1,129 @@
+// Global water surface river width and centerline
+
+// Load the JRC Global Surface Water dataset and select 'occurrence' band
+var jrc_occr = ee.Image("JRC/GSW1_0/GlobalSurfaceWater").select(['occurrence'], ['b1']);
+
+// Create a binary water mask where occurrence > 50%
+var water = jrc_occr.gt(50).unmask(0);
+
+// Zhang-Suen thinning algorithm for centerline extraction
+var Zhang_Suen = function(image, iterations) {
+  var knl = ee.Kernel.fixed(3, 3, [[1, 1, 1], [1, 0, 1], [1, 1, 1]]);
+  var output = image;
+
+  for (var i = 0; i < iterations; i++) {
+    // First iteration
+    var ngb1 = output.neighborhoodToBands(knl).select(
+      ['b1_-1_-1', 'b1_0_-1', 'b1_1_-1', 'b1_-1_0', 'b1_1_0', 'b1_-1_1', 'b1_0_1', 'b1_1_1'],
+      ['p9', 'p2', 'p3', 'p8', 'p4', 'p7', 'p6', 'p5']
+    );
+    var con11 = ngb1.expression("b('p2') + b('p3') + b('p4') + b('p5') + b('p6') + b('p7') + b('p8') + b('p9')")
+                   .gte(2).and(
+                     ngb1.expression("b('p2') + b('p3') + b('p4') + b('p5') + b('p6') + b('p7') + b('p8') + b('p9')")
+                     .lte(6)
+                   );
+    var con12 = ngb1.expression(
+      "((b('p3') - b('p2')) > 0) + ((b('p4') - b('p3')) > 0) + ((b('p5') - b('p4')) > 0) + " +
+      "((b('p6') - b('p5')) > 0) + ((b('p7') - b('p6')) > 0) + ((b('p8') - b('p7')) > 0) + " +
+      "((b('p9') - b('p8')) > 0) + ((b('p2') - b('p9')) > 0)"
+    ).eq(1);
+    var con13 = ngb1.expression("b('p2') * b('p4') * b('p6')").eq(0);
+    var con14 = ngb1.expression("b('p4') * b('p6') * b('p8')").eq(0);
+    output = output.updateMask(con11.and(con12).and(con13).and(con14).eq(0)).unmask(0);
+    
+    // Second iteration
+    var ngb2 = output.neighborhoodToBands(knl).select(
+      ['b1_-1_-1', 'b1_0_-1', 'b1_1_-1', 'b1_-1_0', 'b1_1_0', 'b1_-1_1', 'b1_0_1', 'b1_1_1'],
+      ['p9', 'p2', 'p3', 'p8', 'p4', 'p7', 'p6', 'p5']
+    );
+    var con21 = ngb2.expression("b('p2') + b('p3') + b('p4') + b('p5') + b('p6') + b('p7') + b('p8') + b('p9')")
+                   .gte(2).and(
+                     ngb2.expression("b('p2') + b('p3') + b('p4') + b('p5') + b('p6') + b('p7') + b('p8') + b('p9')")
+                     .lte(6)
+                   );
+    var con22 = ngb2.expression(
+      "((b('p3') - b('p2')) > 0) + ((b('p4') - b('p3')) > 0) + ((b('p5') - b('p4')) > 0) + " +
+      "((b('p6') - b('p5')) > 0) + ((b('p7') - b('p6')) > 0) + ((b('p8') - b('p7')) > 0) + " +
+      "((b('p9') - b('p8')) > 0) + ((b('p2') - b('p9')) > 0)"
+    ).eq(1);
+    var con23 = ngb2.expression("b('p2') * b('p4') * b('p8')").eq(0);
+    var con24 = ngb2.expression("b('p2') * b('p6') * b('p8')").eq(0);
+    output = output.updateMask(con21.and(con22).and(con23).and(con24).eq(0)).unmask(0);
+  }
+  
+  return output;
+};
+
+// Apply Zhang-Suen thinning algorithm to get the centerline
+var skel = Zhang_Suen(water, 50);
+
+// Calculate the distance transform for the width
+var distanceTransform = water.fastDistanceTransform(128).sqrt();
+var widthMap = distanceTransform.multiply(2).updateMask(skel);
+
+// Add the water mask layer
+Map.centerObject(water, 6);
+Map.addLayer(water, {min: 0, max: 1, palette: ['white', 'blue']}, 'Water Mask');
+
+// Add the medial axis (centerline) before thinning
+var medialAxis = water.reduceNeighborhood({
+  reducer: ee.Reducer.median(),
+  kernel: ee.Kernel.circle(1)
+});
+Map.addLayer(medialAxis, {palette: ['green'], min: 0, max: 1}, 'Medial Axis Centerline');
+
+// Add the thinned centerline
+Map.addLayer(skel.mask(skel), {palette: ['black'], min: 1, max: 1}, 'Thinned Centerline');
+
+// Add the width map
+Map.addLayer(widthMap, {min: 0, max: 500, palette: ['blue', 'green', 'yellow', 'orange', 'red']}, 'Width Map');
+
+// Check if the clicked point intersects the width map and print results
+Map.onClick(function(coords) {
+  var clickPoint = ee.Geometry.Point([coords.lon, coords.lat]);
+
+  // Check if the clicked point is within the water mask
+  var pointInWater = water.reduceRegion({
+    reducer: ee.Reducer.mean(),
+    geometry: clickPoint,
+    scale: 30,
+    maxPixels: 1e8
+  }).get('b1');
+
+  // If the point is within the water mask, calculate width
+  pointInWater.evaluate(function(isWater) {
+    if (isWater > 0) {
+      // Get width at clicked location
+      var widthAtPoint = widthMap.reduceRegion({
+        reducer: ee.Reducer.mean(),
+        geometry: clickPoint,
+        scale: 30,  // Adjust scale if necessary
+        maxPixels: 1e8
+      });
+
+      // Evaluate and print the results in the console
+      widthAtPoint.evaluate(function(result) {
+        if (result && result['distance']) {
+          var width = result['distance'];
+          print('Latitude:', coords.lat);
+          print('Longitude:', coords.lon);
+          print('Width (m):', width);
+
+          // Optionally, create a point layer to visualize width
+          var widthValuePoint = ee.FeatureCollection([ee.Feature(clickPoint, {width: width})]);
+          Map.addLayer(widthValuePoint, {color: 'red', pointSize: 5}, 'Width Point');
+        } else {
+          print('No valid width data at this point. Latitude:', coords.lat, 'Longitude:', coords.lon);
+        }
+      });
+    } else {
+      print('Point is not within the water body. Latitude:', coords.lat, 'Longitude:', coords.lon);
+    }
+  });
+});
+
+// Add the classified width map (with opacity)
+Map.addLayer(widthMap.mask(widthMap), {min: 0, max: 500, palette: ['blue', 'green', 'yellow', 'orange', 'red'], opacity: 0.5}, 'Width Classified');
+
+
 
