@@ -1,0 +1,4 @@
+system:index,latitude,longitude,width,.geo
+1,32.54852001,-87.79798199,930,"{""type"":""MultiPoint"",""coordinates"":[]}"
+2,32.54798241,-87.79785877,370.5479859,"{""type"":""MultiPoint"",""coordinates"":[]}"
+3,32.54798252,-87.79545551,410.6086688,"{""type"":""MultiPoint"",""coordinates"":[]}"
